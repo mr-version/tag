@@ -1,0 +1,73 @@
+name: 'Create Version Tags'
+description: 'Create git tags for monorepo projects using Mister.Version'
+author: 'Mister.Version Team'
+
+branding:
+  icon: 'tag'
+  color: 'orange'
+
+inputs:
+  repository-path:
+    description: 'Path to the Git repository root'
+    required: false
+    default: '.'
+  projects:
+    description: 'Glob pattern or comma-separated list of project files to tag'
+    required: false
+    default: '**/*.csproj'
+  tag-prefix:
+    description: 'Prefix for version tags'
+    required: false
+    default: 'v'
+  create-global-tags:
+    description: 'Create global tags for major releases'
+    required: false
+    default: 'false'
+  global-tag-strategy:
+    description: 'Strategy for global tags (major-only, all, none)'
+    required: false
+    default: 'major-only'
+  tag-message-template:
+    description: 'Template for tag messages (use {version}, {project}, {type} placeholders)'
+    required: false
+    default: 'Release {type} {version}'
+  dry-run:
+    description: 'Show what tags would be created without actually creating them'
+    required: false
+    default: 'false'
+  fail-on-existing:
+    description: 'Fail if a tag already exists'
+    required: false
+    default: 'false'
+  include-test-projects:
+    description: 'Include test projects when creating tags'
+    required: false
+    default: 'false'
+  include-non-packable:
+    description: 'Include non-packable projects when creating tags'
+    required: false
+    default: 'false'
+  only-changed:
+    description: 'Only create tags for projects with version changes'
+    required: false
+    default: 'true'
+  sign-tags:
+    description: 'Sign tags with GPG (requires git config user.signingkey)'
+    required: false
+    default: 'false'
+  
+outputs:
+  tags-created:
+    description: 'JSON array of tags that were created'
+  global-tags-created:
+    description: 'JSON array of global tags that were created'
+  project-tags-created:
+    description: 'JSON array of project-specific tags that were created'
+  tags-count:
+    description: 'Total number of tags created'
+  tags-skipped:
+    description: 'Number of tags that were skipped (already exist or dry-run)'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
