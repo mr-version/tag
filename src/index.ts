@@ -102,13 +102,20 @@ async function run(): Promise<void> {
     core.setOutput('tags-count', result.totalCount.toString())
     core.setOutput('tags-skipped', result.skippedCount.toString())
 
-    // Add to job summary
-    await addJobSummary(result, dryRun)
+    // Add collapsible summary to job output
+    await addJobSummary(result, dryRun, filteredProjects.length)
 
     const action = dryRun ? 'analyzed' : 'created'
     core.info(`✅ ${result.totalCount} tags ${action}, ${result.skippedCount} skipped`)
 
   } catch (error) {
+    await core.summary
+      .addHeading('❌ Tag Creation Failed')
+      .addDetails('🐛 Error Details',
+        `\`\`\`\n${error instanceof Error ? error.message : String(error)}\n\`\`\``
+      )
+      .write()
+
     core.setFailed(`Failed to create tags: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
@@ -430,30 +437,57 @@ async function checkTagExists(tagName: string, repositoryPath: string): Promise<
   }
 }
 
-const asTable = (...rows: SummaryTableRow[]) => core.summary.addTable(rows);
-
 const asTableHeaderRow = (...data: string[]): SummaryTableRow => data.map(d => asSummaryTableCell(d, true))
 
 const asTableRow = (...data: (string | number)[]): SummaryTableRow => data.map(d => asSummaryTableCell(`${d}`, false));
 
 const asSummaryTableCell = (data: string, header?: boolean): SummaryTableCell => ({ data, header: header ?? false });
 
-async function addJobSummary(result: TagCreationResult, dryRun: boolean): Promise<void> {
-  const summary = core.summary
+async function addJobSummary(result: TagCreationResult, dryRun: boolean, totalProjects: number): Promise<void> {
+  const createdTags = result.tagsCreated.filter(t => t.created)
+  const skippedTags = result.tagsCreated.filter(t => t.skipped)
+  const failedTags = result.tagsCreated.filter(t => !t.created && !t.skipped)
 
-  summary.addHeading(`Tag Creation ${dryRun ? 'Analysis' : 'Results'}`)
+  await core.summary
+    .addHeading(`🏷️ Tag Creation ${dryRun ? 'Analysis' : 'Results'}`)
+    .addDetails('📊 Summary Statistics', 
+      `- **Total Projects**: ${totalProjects}\n` +
+      `- **Tags ${dryRun ? 'Analyzed' : 'Created'}**: ${result.totalCount}\n` +
+      `- **Project Tags**: ${result.projectTags.length}\n` +
+      `- **Global Tags**: ${result.globalTags.length}\n` +
+      `- **Skipped Tags**: ${result.skippedCount}\n` +
+      `- **Mode**: ${dryRun ? '🧪 Dry Run' : '🚀 Live'}`
+    )
 
-  asTable(
-    asTableHeaderRow('Metric', 'Count'),
-    asTableRow(`Total Tags ${dryRun ? 'Analyzed' : 'Created'}`, result.totalCount),
-    asTableRow('Project Tags', result.projectTags.length),
-    asTableRow('Global Tags', result.globalTags.length),
-    asTableRow('Skipped Tags', result.skippedCount));
+  if (createdTags.length > 0) {
+    await core.summary
+      .addDetails('✅ Successfully Created Tags',
+        createdTags.map(tag => 
+          `- **${tag.tagName}** (${tag.isGlobal ? 'Global' : tag.projectName}) - \`${tag.version}\``
+        ).join('\n')
+      )
+  }
+
+  if (skippedTags.length > 0) {
+    await core.summary
+      .addDetails('⏭️ Skipped Tags',
+        skippedTags.map(tag => 
+          `- **${tag.tagName}** (${tag.isGlobal ? 'Global' : tag.projectName}) - _${tag.reason}_`
+        ).join('\n')
+      )
+  }
+
+  if (failedTags.length > 0) {
+    await core.summary
+      .addDetails('❌ Failed Tags',
+        failedTags.map(tag => 
+          `- **${tag.tagName}** (${tag.isGlobal ? 'Global' : tag.projectName}) - _${tag.reason}_`
+        ).join('\n')
+      )
+  }
 
   if (result.tagsCreated.length > 0) {
-    summary.addBreak();
-    summary.addHeading('Tag Details', 3)
-
+    // Create detailed table in collapsible section
     const tableLines: SummaryTableRow[] = [
       asTableHeaderRow('Tag', 'Type', 'Project', 'Version', 'Status')
     ]
@@ -464,14 +498,25 @@ async function addJobSummary(result: TagCreationResult, dryRun: boolean): Promis
       tableLines.push(asTableRow(tag.tagName, type, tag.projectName, tag.version, status));
     }
 
-    asTable(...tableLines)
+    await core.summary
+      .addDetails('📋 Detailed Tag Information', 
+        // Convert table to markdown manually for better formatting in details
+        '| Tag | Type | Project | Version | Status |\n' +
+        '|-----|------|---------|---------|--------|\n' +
+        result.tagsCreated.map(tag => {
+          const status = tag.created ? '✅ Created' : (tag.skipped ? `⏭️ Skipped: ${tag.reason}` : '❌ Failed')
+          const type = tag.isGlobal ? 'Global' : 'Project'
+          return `| \`${tag.tagName}\` | ${type} | ${tag.projectName} | \`${tag.version}\` | ${status} |`
+        }).join('\n')
+      )
   }
 
   if (dryRun) {
-    summary.addRaw('\n> **Dry Run Mode** - No tags were actually created')
+    await core.summary
+      .addQuote('**Dry Run Mode** - No tags were actually created. This was a preview of what would happen.')
   }
 
-  await summary.write()
+  await core.summary.write()
 }
 
 // Run the action

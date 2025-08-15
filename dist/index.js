@@ -1,392 +1,6 @@
 require('./sourcemap-register.js');/******/ (() => { // webpackBootstrap
 /******/ 	var __webpack_modules__ = ({
 
-/***/ 137:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
-
-"use strict";
-
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.run = run;
-const core = __importStar(__nccwpck_require__(7484));
-const exec = __importStar(__nccwpck_require__(5236));
-const glob = __importStar(__nccwpck_require__(7206));
-const path = __importStar(__nccwpck_require__(6928));
-async function run() {
-    try {
-        const repositoryPath = core.getInput('repository-path') || '.';
-        const projectsInput = core.getInput('projects') || '**/*.csproj';
-        const tagPrefix = core.getInput('tag-prefix') || 'v';
-        const createGlobalTags = core.getBooleanInput('create-global-tags');
-        const globalTagStrategy = core.getInput('global-tag-strategy') || 'major-only';
-        const tagMessageTemplate = core.getInput('tag-message-template') || 'Release {type} {version}';
-        const dryRun = core.getBooleanInput('dry-run');
-        const failOnExisting = core.getBooleanInput('fail-on-existing');
-        const includeTestProjects = core.getBooleanInput('include-test-projects');
-        const includeNonPackable = core.getBooleanInput('include-non-packable');
-        const onlyChanged = core.getBooleanInput('only-changed');
-        const signTags = core.getBooleanInput('sign-tags');
-        core.info('Creating version tags...');
-        if (dryRun) {
-            core.info('Running in dry-run mode - no tags will be created');
-        }
-        // Find project files
-        const projectFiles = await findProjectFiles(projectsInput, repositoryPath);
-        core.info(`Found ${projectFiles.length} project files`);
-        if (projectFiles.length === 0) {
-            core.warning('No project files found matching the pattern');
-            return;
-        }
-        // Calculate versions for each project
-        const projectVersions = [];
-        for (const projectFile of projectFiles) {
-            const version = await getProjectVersion(projectFile, repositoryPath, tagPrefix);
-            projectVersions.push(version);
-        }
-        // Filter projects based on settings
-        const filteredProjects = filterProjects(projectVersions, {
-            includeTestProjects,
-            includeNonPackable,
-            onlyChanged
-        });
-        core.info(`Processing ${filteredProjects.length} projects for tagging`);
-        // Create tags
-        const result = await createTags({
-            projects: filteredProjects,
-            repositoryPath,
-            tagPrefix,
-            createGlobalTags,
-            globalTagStrategy,
-            tagMessageTemplate,
-            dryRun,
-            failOnExisting,
-            signTags
-        });
-        // Set outputs
-        core.setOutput('tags-created', JSON.stringify(result.tagsCreated));
-        core.setOutput('global-tags-created', JSON.stringify(result.globalTags));
-        core.setOutput('project-tags-created', JSON.stringify(result.projectTags));
-        core.setOutput('tags-count', result.totalCount.toString());
-        core.setOutput('tags-skipped', result.skippedCount.toString());
-        // Add to job summary
-        await addJobSummary(result, dryRun);
-        const action = dryRun ? 'analyzed' : 'created';
-        core.info(`✅ ${result.totalCount} tags ${action}, ${result.skippedCount} skipped`);
-    }
-    catch (error) {
-        core.setFailed(`Failed to create tags: ${error instanceof Error ? error.message : String(error)}`);
-    }
-}
-async function findProjectFiles(pattern, repositoryPath) {
-    const globber = await glob.create(pattern, {
-        matchDirectories: false,
-        implicitDescendants: true
-    });
-    const files = await globber.glob();
-    // Filter to only include actual project files
-    return files.filter(file => file.endsWith('.csproj') ||
-        file.endsWith('.vbproj') ||
-        file.endsWith('.fsproj')).map(file => path.resolve(repositoryPath, file));
-}
-async function getProjectVersion(projectFile, repositoryPath, tagPrefix) {
-    const args = [
-        'version',
-        '--repo', repositoryPath,
-        '--project', projectFile,
-        '--tag-prefix', tagPrefix,
-        '--json'
-    ];
-    const output = await exec.getExecOutput('mr-version', args, {
-        silent: true,
-        ignoreReturnCode: true
-    });
-    if (output.exitCode !== 0) {
-        throw new Error(`mr-version failed for ${projectFile}: ${output.stderr}`);
-    }
-    try {
-        return JSON.parse(output.stdout);
-    }
-    catch (error) {
-        throw new Error(`Failed to parse mr-version output for ${projectFile}: ${error}`);
-    }
-}
-function filterProjects(projects, options) {
-    return projects.filter(project => {
-        // Filter test projects
-        if (!options.includeTestProjects && project.isTestProject) {
-            return false;
-        }
-        // Filter non-packable projects
-        if (!options.includeNonPackable && !project.isPackable) {
-            return false;
-        }
-        // Filter unchanged projects
-        if (options.onlyChanged && !project.versionChanged) {
-            return false;
-        }
-        return true;
-    });
-}
-async function createTags(options) {
-    const result = {
-        tagsCreated: [],
-        globalTags: [],
-        projectTags: [],
-        totalCount: 0,
-        skippedCount: 0
-    };
-    // Create project-specific tags
-    for (const project of options.projects) {
-        const projectTag = `${project.project.toLowerCase()}/${options.tagPrefix}${project.version}`;
-        const message = options.tagMessageTemplate
-            .replace('{version}', project.version)
-            .replace('{project}', project.project)
-            .replace('{type}', project.project);
-        const tagInfo = await createTag({
-            tagName: projectTag,
-            message,
-            projectName: project.project,
-            version: project.version,
-            isGlobal: false,
-            repositoryPath: options.repositoryPath,
-            dryRun: options.dryRun,
-            failOnExisting: options.failOnExisting,
-            signTags: options.signTags
-        });
-        result.tagsCreated.push(tagInfo);
-        result.projectTags.push(tagInfo);
-        if (tagInfo.created) {
-            result.totalCount++;
-        }
-        else {
-            result.skippedCount++;
-        }
-    }
-    // Create global tags if enabled
-    if (options.createGlobalTags) {
-        const globalTags = determineGlobalTags(options.projects, options.globalTagStrategy, options.tagPrefix);
-        for (const globalTag of globalTags) {
-            const message = options.tagMessageTemplate
-                .replace('{version}', globalTag.version)
-                .replace('{project}', 'Global')
-                .replace('{type}', 'Global');
-            const tagInfo = await createTag({
-                tagName: globalTag.tagName,
-                message,
-                projectName: 'Global',
-                version: globalTag.version,
-                isGlobal: true,
-                repositoryPath: options.repositoryPath,
-                dryRun: options.dryRun,
-                failOnExisting: options.failOnExisting,
-                signTags: options.signTags
-            });
-            result.tagsCreated.push(tagInfo);
-            result.globalTags.push(tagInfo);
-            if (tagInfo.created) {
-                result.totalCount++;
-            }
-            else {
-                result.skippedCount++;
-            }
-        }
-    }
-    return result;
-}
-function determineGlobalTags(projects, strategy, tagPrefix) {
-    const globalTags = [];
-    for (const project of projects) {
-        const version = project.version;
-        const versionParts = version.split('.');
-        if (versionParts.length < 3)
-            continue;
-        const minor = parseInt(versionParts[1]);
-        const patch = parseInt(versionParts[2]);
-        let shouldCreateGlobalTag = false;
-        switch (strategy.toLowerCase()) {
-            case 'major-only':
-                shouldCreateGlobalTag = minor === 0 && patch === 0;
-                break;
-            case 'all':
-                shouldCreateGlobalTag = true;
-                break;
-            case 'none':
-                shouldCreateGlobalTag = false;
-                break;
-        }
-        if (shouldCreateGlobalTag) {
-            const globalTagName = `${tagPrefix}${version}`;
-            // Avoid duplicates
-            if (!globalTags.some(tag => tag.tagName === globalTagName)) {
-                globalTags.push({
-                    tagName: globalTagName,
-                    version: version
-                });
-            }
-        }
-    }
-    return globalTags;
-}
-async function createTag(options) {
-    const tagInfo = {
-        tagName: options.tagName,
-        version: options.version,
-        projectName: options.projectName,
-        isGlobal: options.isGlobal,
-        message: options.message,
-        created: false,
-        skipped: false
-    };
-    // Check if tag already exists
-    const tagExists = await checkTagExists(options.tagName, options.repositoryPath);
-    if (tagExists) {
-        tagInfo.skipped = true;
-        tagInfo.reason = 'Tag already exists';
-        if (options.failOnExisting) {
-            throw new Error(`Tag ${options.tagName} already exists`);
-        }
-        core.warning(`Tag ${options.tagName} already exists, skipping`);
-        return tagInfo;
-    }
-    if (options.dryRun) {
-        tagInfo.skipped = true;
-        tagInfo.reason = 'Dry run mode';
-        core.info(`[DRY RUN] Would create tag: ${options.tagName}`);
-        return tagInfo;
-    }
-    // Configure git identity if not already set
-    try {
-        const emailCheck = await exec.getExecOutput('git', ['config', 'user.email'], {
-            cwd: options.repositoryPath,
-            silent: true,
-            ignoreReturnCode: true
-        });
-        if (emailCheck.exitCode !== 0 || !emailCheck.stdout.trim()) {
-            await exec.getExecOutput('git', ['config', 'user.email', 'actions@github.com'], {
-                cwd: options.repositoryPath,
-                silent: true
-            });
-            await exec.getExecOutput('git', ['config', 'user.name', 'GitHub Actions'], {
-                cwd: options.repositoryPath,
-                silent: true
-            });
-        }
-    }
-    catch (error) {
-        await exec.getExecOutput('git', ['config', 'user.email', 'actions@github.com'], {
-            cwd: options.repositoryPath,
-            silent: true
-        });
-        await exec.getExecOutput('git', ['config', 'user.name', 'GitHub Actions'], {
-            cwd: options.repositoryPath,
-            silent: true
-        });
-    }
-    // Create the tag
-    try {
-        const args = ['tag'];
-        if (options.signTags) {
-            args.push('-s');
-        }
-        args.push('-m', options.message, options.tagName);
-        const output = await exec.getExecOutput('git', args, {
-            cwd: options.repositoryPath,
-            silent: true,
-            ignoreReturnCode: true
-        });
-        if (output.exitCode !== 0) {
-            throw new Error(`Git tag creation failed: ${output.stderr}`);
-        }
-        tagInfo.created = true;
-        core.info(`Created tag: ${options.tagName}`);
-    }
-    catch (error) {
-        tagInfo.skipped = true;
-        tagInfo.reason = `Failed to create: ${error}`;
-        core.error(`Failed to create tag ${options.tagName}: ${error}`);
-    }
-    return tagInfo;
-}
-async function checkTagExists(tagName, repositoryPath) {
-    try {
-        const output = await exec.getExecOutput('git', ['tag', '-l', tagName], {
-            cwd: repositoryPath,
-            silent: true,
-            ignoreReturnCode: true
-        });
-        return output.stdout.trim() === tagName;
-    }
-    catch {
-        return false;
-    }
-}
-const asTable = (...rows) => core.summary.addTable(rows);
-const asTableHeaderRow = (...data) => data.map(d => asSummaryTableCell(d, true));
-const asTableRow = (...data) => data.map(d => asSummaryTableCell(`${d}`, false));
-const asSummaryTableCell = (data, header) => ({ data, header: header ?? false });
-async function addJobSummary(result, dryRun) {
-    const summary = core.summary;
-    summary.addHeading(`Tag Creation ${dryRun ? 'Analysis' : 'Results'}`);
-    asTable(asTableHeaderRow('Metric', 'Count'), asTableRow(`Total Tags ${dryRun ? 'Analyzed' : 'Created'}`, result.totalCount), asTableRow('Project Tags', result.projectTags.length), asTableRow('Global Tags', result.globalTags.length), asTableRow('Skipped Tags', result.skippedCount));
-    if (result.tagsCreated.length > 0) {
-        summary.addBreak();
-        summary.addHeading('Tag Details', 3);
-        const tableLines = [
-            asTableHeaderRow('Tag', 'Type', 'Project', 'Version', 'Status')
-        ];
-        for (const tag of result.tagsCreated) {
-            const status = tag.created ? '✅ Created' : (tag.skipped ? `⏭️ Skipped: ${tag.reason}` : '❌ Failed');
-            const type = tag.isGlobal ? 'Global' : 'Project';
-            tableLines.push(asTableRow(tag.tagName, type, tag.projectName, tag.version, status));
-        }
-        asTable(...tableLines);
-    }
-    if (dryRun) {
-        summary.addRaw('\n> **Dry Run Mode** - No tags were actually created');
-    }
-    await summary.write();
-}
-// Run the action
-if (require.main === require.cache[eval('__filename')]) {
-    run();
-}
-//# sourceMappingURL=index.js.map
-
-/***/ }),
-
 /***/ 4914:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -28473,6 +28087,424 @@ module.exports = {
 
 /***/ }),
 
+/***/ 9407:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.run = run;
+const core = __importStar(__nccwpck_require__(7484));
+const exec = __importStar(__nccwpck_require__(5236));
+const glob = __importStar(__nccwpck_require__(7206));
+const path = __importStar(__nccwpck_require__(6928));
+async function run() {
+    try {
+        const repositoryPath = core.getInput('repository-path') || '.';
+        const projectsInput = core.getInput('projects') || '**/*.csproj';
+        const tagPrefix = core.getInput('tag-prefix') || 'v';
+        const createGlobalTags = core.getBooleanInput('create-global-tags');
+        const globalTagStrategy = core.getInput('global-tag-strategy') || 'major-only';
+        const tagMessageTemplate = core.getInput('tag-message-template') || 'Release {type} {version}';
+        const dryRun = core.getBooleanInput('dry-run');
+        const failOnExisting = core.getBooleanInput('fail-on-existing');
+        const includeTestProjects = core.getBooleanInput('include-test-projects');
+        const includeNonPackable = core.getBooleanInput('include-non-packable');
+        const onlyChanged = core.getBooleanInput('only-changed');
+        const signTags = core.getBooleanInput('sign-tags');
+        core.info('Creating version tags...');
+        if (dryRun) {
+            core.info('Running in dry-run mode - no tags will be created');
+        }
+        // Find project files
+        const projectFiles = await findProjectFiles(projectsInput, repositoryPath);
+        core.info(`Found ${projectFiles.length} project files`);
+        if (projectFiles.length === 0) {
+            core.warning('No project files found matching the pattern');
+            return;
+        }
+        // Calculate versions for each project
+        const projectVersions = [];
+        for (const projectFile of projectFiles) {
+            const version = await getProjectVersion(projectFile, repositoryPath, tagPrefix);
+            projectVersions.push(version);
+        }
+        // Filter projects based on settings
+        const filteredProjects = filterProjects(projectVersions, {
+            includeTestProjects,
+            includeNonPackable,
+            onlyChanged
+        });
+        core.info(`Processing ${filteredProjects.length} projects for tagging`);
+        // Create tags
+        const result = await createTags({
+            projects: filteredProjects,
+            repositoryPath,
+            tagPrefix,
+            createGlobalTags,
+            globalTagStrategy,
+            tagMessageTemplate,
+            dryRun,
+            failOnExisting,
+            signTags
+        });
+        // Set outputs
+        core.setOutput('tags-created', JSON.stringify(result.tagsCreated));
+        core.setOutput('global-tags-created', JSON.stringify(result.globalTags));
+        core.setOutput('project-tags-created', JSON.stringify(result.projectTags));
+        core.setOutput('tags-count', result.totalCount.toString());
+        core.setOutput('tags-skipped', result.skippedCount.toString());
+        // Add collapsible summary to job output
+        await addJobSummary(result, dryRun, filteredProjects.length);
+        const action = dryRun ? 'analyzed' : 'created';
+        core.info(`✅ ${result.totalCount} tags ${action}, ${result.skippedCount} skipped`);
+    }
+    catch (error) {
+        await core.summary
+            .addHeading('❌ Tag Creation Failed')
+            .addDetails('🐛 Error Details', `\`\`\`\n${error instanceof Error ? error.message : String(error)}\n\`\`\``)
+            .write();
+        core.setFailed(`Failed to create tags: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+async function findProjectFiles(pattern, repositoryPath) {
+    const globber = await glob.create(pattern, {
+        matchDirectories: false,
+        implicitDescendants: true
+    });
+    const files = await globber.glob();
+    // Filter to only include actual project files
+    return files.filter(file => file.endsWith('.csproj') ||
+        file.endsWith('.vbproj') ||
+        file.endsWith('.fsproj')).map(file => path.resolve(repositoryPath, file));
+}
+async function getProjectVersion(projectFile, repositoryPath, tagPrefix) {
+    const args = [
+        'version',
+        '--repo', repositoryPath,
+        '--project', projectFile,
+        '--tag-prefix', tagPrefix,
+        '--json'
+    ];
+    const output = await exec.getExecOutput('mr-version', args, {
+        silent: true,
+        ignoreReturnCode: true
+    });
+    if (output.exitCode !== 0) {
+        throw new Error(`mr-version failed for ${projectFile}: ${output.stderr}`);
+    }
+    try {
+        return JSON.parse(output.stdout);
+    }
+    catch (error) {
+        throw new Error(`Failed to parse mr-version output for ${projectFile}: ${error}`);
+    }
+}
+function filterProjects(projects, options) {
+    return projects.filter(project => {
+        // Filter test projects
+        if (!options.includeTestProjects && project.isTestProject) {
+            return false;
+        }
+        // Filter non-packable projects
+        if (!options.includeNonPackable && !project.isPackable) {
+            return false;
+        }
+        // Filter unchanged projects
+        if (options.onlyChanged && !project.versionChanged) {
+            return false;
+        }
+        return true;
+    });
+}
+async function createTags(options) {
+    const result = {
+        tagsCreated: [],
+        globalTags: [],
+        projectTags: [],
+        totalCount: 0,
+        skippedCount: 0
+    };
+    // Create project-specific tags
+    for (const project of options.projects) {
+        const projectTag = `${project.project.toLowerCase()}/${options.tagPrefix}${project.version}`;
+        const message = options.tagMessageTemplate
+            .replace('{version}', project.version)
+            .replace('{project}', project.project)
+            .replace('{type}', project.project);
+        const tagInfo = await createTag({
+            tagName: projectTag,
+            message,
+            projectName: project.project,
+            version: project.version,
+            isGlobal: false,
+            repositoryPath: options.repositoryPath,
+            dryRun: options.dryRun,
+            failOnExisting: options.failOnExisting,
+            signTags: options.signTags
+        });
+        result.tagsCreated.push(tagInfo);
+        result.projectTags.push(tagInfo);
+        if (tagInfo.created) {
+            result.totalCount++;
+        }
+        else {
+            result.skippedCount++;
+        }
+    }
+    // Create global tags if enabled
+    if (options.createGlobalTags) {
+        const globalTags = determineGlobalTags(options.projects, options.globalTagStrategy, options.tagPrefix);
+        for (const globalTag of globalTags) {
+            const message = options.tagMessageTemplate
+                .replace('{version}', globalTag.version)
+                .replace('{project}', 'Global')
+                .replace('{type}', 'Global');
+            const tagInfo = await createTag({
+                tagName: globalTag.tagName,
+                message,
+                projectName: 'Global',
+                version: globalTag.version,
+                isGlobal: true,
+                repositoryPath: options.repositoryPath,
+                dryRun: options.dryRun,
+                failOnExisting: options.failOnExisting,
+                signTags: options.signTags
+            });
+            result.tagsCreated.push(tagInfo);
+            result.globalTags.push(tagInfo);
+            if (tagInfo.created) {
+                result.totalCount++;
+            }
+            else {
+                result.skippedCount++;
+            }
+        }
+    }
+    return result;
+}
+function determineGlobalTags(projects, strategy, tagPrefix) {
+    const globalTags = [];
+    for (const project of projects) {
+        const version = project.version;
+        const versionParts = version.split('.');
+        if (versionParts.length < 3)
+            continue;
+        const minor = parseInt(versionParts[1]);
+        const patch = parseInt(versionParts[2]);
+        let shouldCreateGlobalTag = false;
+        switch (strategy.toLowerCase()) {
+            case 'major-only':
+                shouldCreateGlobalTag = minor === 0 && patch === 0;
+                break;
+            case 'all':
+                shouldCreateGlobalTag = true;
+                break;
+            case 'none':
+                shouldCreateGlobalTag = false;
+                break;
+        }
+        if (shouldCreateGlobalTag) {
+            const globalTagName = `${tagPrefix}${version}`;
+            // Avoid duplicates
+            if (!globalTags.some(tag => tag.tagName === globalTagName)) {
+                globalTags.push({
+                    tagName: globalTagName,
+                    version: version
+                });
+            }
+        }
+    }
+    return globalTags;
+}
+async function createTag(options) {
+    const tagInfo = {
+        tagName: options.tagName,
+        version: options.version,
+        projectName: options.projectName,
+        isGlobal: options.isGlobal,
+        message: options.message,
+        created: false,
+        skipped: false
+    };
+    // Check if tag already exists
+    const tagExists = await checkTagExists(options.tagName, options.repositoryPath);
+    if (tagExists) {
+        tagInfo.skipped = true;
+        tagInfo.reason = 'Tag already exists';
+        if (options.failOnExisting) {
+            throw new Error(`Tag ${options.tagName} already exists`);
+        }
+        core.warning(`Tag ${options.tagName} already exists, skipping`);
+        return tagInfo;
+    }
+    if (options.dryRun) {
+        tagInfo.skipped = true;
+        tagInfo.reason = 'Dry run mode';
+        core.info(`[DRY RUN] Would create tag: ${options.tagName}`);
+        return tagInfo;
+    }
+    // Configure git identity if not already set
+    try {
+        const emailCheck = await exec.getExecOutput('git', ['config', 'user.email'], {
+            cwd: options.repositoryPath,
+            silent: true,
+            ignoreReturnCode: true
+        });
+        if (emailCheck.exitCode !== 0 || !emailCheck.stdout.trim()) {
+            await exec.getExecOutput('git', ['config', 'user.email', 'actions@github.com'], {
+                cwd: options.repositoryPath,
+                silent: true
+            });
+            await exec.getExecOutput('git', ['config', 'user.name', 'GitHub Actions'], {
+                cwd: options.repositoryPath,
+                silent: true
+            });
+        }
+    }
+    catch (error) {
+        await exec.getExecOutput('git', ['config', 'user.email', 'actions@github.com'], {
+            cwd: options.repositoryPath,
+            silent: true
+        });
+        await exec.getExecOutput('git', ['config', 'user.name', 'GitHub Actions'], {
+            cwd: options.repositoryPath,
+            silent: true
+        });
+    }
+    // Create the tag
+    try {
+        const args = ['tag'];
+        if (options.signTags) {
+            args.push('-s');
+        }
+        args.push('-m', options.message, options.tagName);
+        const output = await exec.getExecOutput('git', args, {
+            cwd: options.repositoryPath,
+            silent: true,
+            ignoreReturnCode: true
+        });
+        if (output.exitCode !== 0) {
+            throw new Error(`Git tag creation failed: ${output.stderr}`);
+        }
+        tagInfo.created = true;
+        core.info(`Created tag: ${options.tagName}`);
+    }
+    catch (error) {
+        tagInfo.skipped = true;
+        tagInfo.reason = `Failed to create: ${error}`;
+        core.error(`Failed to create tag ${options.tagName}: ${error}`);
+    }
+    return tagInfo;
+}
+async function checkTagExists(tagName, repositoryPath) {
+    try {
+        const output = await exec.getExecOutput('git', ['tag', '-l', tagName], {
+            cwd: repositoryPath,
+            silent: true,
+            ignoreReturnCode: true
+        });
+        return output.stdout.trim() === tagName;
+    }
+    catch {
+        return false;
+    }
+}
+const asTableHeaderRow = (...data) => data.map(d => asSummaryTableCell(d, true));
+const asTableRow = (...data) => data.map(d => asSummaryTableCell(`${d}`, false));
+const asSummaryTableCell = (data, header) => ({ data, header: header ?? false });
+async function addJobSummary(result, dryRun, totalProjects) {
+    const createdTags = result.tagsCreated.filter(t => t.created);
+    const skippedTags = result.tagsCreated.filter(t => t.skipped);
+    const failedTags = result.tagsCreated.filter(t => !t.created && !t.skipped);
+    await core.summary
+        .addHeading(`🏷️ Tag Creation ${dryRun ? 'Analysis' : 'Results'}`)
+        .addDetails('📊 Summary Statistics', `- **Total Projects**: ${totalProjects}\n` +
+        `- **Tags ${dryRun ? 'Analyzed' : 'Created'}**: ${result.totalCount}\n` +
+        `- **Project Tags**: ${result.projectTags.length}\n` +
+        `- **Global Tags**: ${result.globalTags.length}\n` +
+        `- **Skipped Tags**: ${result.skippedCount}\n` +
+        `- **Mode**: ${dryRun ? '🧪 Dry Run' : '🚀 Live'}`);
+    if (createdTags.length > 0) {
+        await core.summary
+            .addDetails('✅ Successfully Created Tags', createdTags.map(tag => `- **${tag.tagName}** (${tag.isGlobal ? 'Global' : tag.projectName}) - \`${tag.version}\``).join('\n'));
+    }
+    if (skippedTags.length > 0) {
+        await core.summary
+            .addDetails('⏭️ Skipped Tags', skippedTags.map(tag => `- **${tag.tagName}** (${tag.isGlobal ? 'Global' : tag.projectName}) - _${tag.reason}_`).join('\n'));
+    }
+    if (failedTags.length > 0) {
+        await core.summary
+            .addDetails('❌ Failed Tags', failedTags.map(tag => `- **${tag.tagName}** (${tag.isGlobal ? 'Global' : tag.projectName}) - _${tag.reason}_`).join('\n'));
+    }
+    if (result.tagsCreated.length > 0) {
+        // Create detailed table in collapsible section
+        const tableLines = [
+            asTableHeaderRow('Tag', 'Type', 'Project', 'Version', 'Status')
+        ];
+        for (const tag of result.tagsCreated) {
+            const status = tag.created ? '✅ Created' : (tag.skipped ? `⏭️ Skipped: ${tag.reason}` : '❌ Failed');
+            const type = tag.isGlobal ? 'Global' : 'Project';
+            tableLines.push(asTableRow(tag.tagName, type, tag.projectName, tag.version, status));
+        }
+        await core.summary
+            .addDetails('📋 Detailed Tag Information', 
+        // Convert table to markdown manually for better formatting in details
+        '| Tag | Type | Project | Version | Status |\n' +
+            '|-----|------|---------|---------|--------|\n' +
+            result.tagsCreated.map(tag => {
+                const status = tag.created ? '✅ Created' : (tag.skipped ? `⏭️ Skipped: ${tag.reason}` : '❌ Failed');
+                const type = tag.isGlobal ? 'Global' : 'Project';
+                return `| \`${tag.tagName}\` | ${type} | ${tag.projectName} | \`${tag.version}\` | ${status} |`;
+            }).join('\n'));
+    }
+    if (dryRun) {
+        await core.summary
+            .addQuote('**Dry Run Mode** - No tags were actually created. This was a preview of what would happen.');
+    }
+    await core.summary.write();
+}
+// Run the action
+if (require.main === require.cache[eval('__filename')]) {
+    run();
+}
+
+
+/***/ }),
+
 /***/ 2613:
 /***/ ((module) => {
 
@@ -30388,7 +30420,7 @@ module.exports = parseParams
 /******/ 	// startup
 /******/ 	// Load entry module and return exports
 /******/ 	// This entry module is referenced by other modules so it can't be inlined
-/******/ 	var __webpack_exports__ = __nccwpck_require__(137);
+/******/ 	var __webpack_exports__ = __nccwpck_require__(9407);
 /******/ 	module.exports = __webpack_exports__;
 /******/ 	
 /******/ })()
