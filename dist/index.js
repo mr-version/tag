@@ -28087,6 +28087,103 @@ module.exports = {
 
 /***/ }),
 
+/***/ 1243:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.countVersionTags = countVersionTags;
+exports.evaluateHistory = evaluateHistory;
+exports.inspectHistory = inspectHistory;
+const exec = __importStar(__nccwpck_require__(5236));
+function escapeRegExp(text) {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+/** Counts tags that look like version tags: "<prefix><digit>..." or "<project>/<prefix><digit>...". */
+function countVersionTags(tags, tagPrefix) {
+    const pattern = new RegExp(`(^|/)${escapeRegExp(tagPrefix)}\\d`);
+    return tags.filter(tag => pattern.test(tag.trim())).length;
+}
+/**
+ * Decides whether the clone has enough history to calculate versions. A shallow clone (actions/checkout's
+ * default fetch-depth: 1) hides the tags and commits mr-version needs, which silently turns every project
+ * into 0.1.0, so it is an error unless allowShallow is set.
+ */
+function evaluateHistory(info, allowShallow) {
+    if (info.shallow) {
+        const tagState = info.reachableVersionTags === 0
+            ? 'no version tag is reachable from HEAD'
+            : `only part of the history is present (${info.reachableVersionTags} version tag(s) reachable from HEAD)`;
+        const message = `The repository at '${info.gitRoot}' is a shallow clone and ${tagState}, so versions would be calculated ` +
+            `from incomplete history (typically every project becomes 0.1.0). Fetch the full history and tags, e.g. ` +
+            `actions/checkout with 'fetch-depth: 0' (or run 'git fetch --unshallow --tags')` +
+            (allowShallow ? '.' : `, or set 'allow-shallow: true' to calculate anyway.`);
+        return { level: allowShallow ? 'warning' : 'error', message };
+    }
+    if (info.totalTags === 0) {
+        return {
+            level: 'notice',
+            message: `No tags found in '${info.gitRoot}': all projects start from their base version. If this repository ` +
+                `already has releases, make sure tags are fetched (actions/checkout with 'fetch-depth: 0' fetches them).`
+        };
+    }
+    return { level: 'ok' };
+}
+async function git(args, cwd) {
+    return exec.getExecOutput('git', args, { cwd, silent: true, ignoreReturnCode: true });
+}
+async function inspectHistory(repositoryRoot, tagPrefix) {
+    const topLevel = await git(['rev-parse', '--show-toplevel'], repositoryRoot);
+    if (topLevel.exitCode !== 0) {
+        throw new Error(`repository-path '${repositoryRoot}' is not inside a git repository: ${(topLevel.stderr || topLevel.stdout).trim()}`);
+    }
+    const gitRoot = topLevel.stdout.trim();
+    const shallowOutput = await git(['rev-parse', '--is-shallow-repository'], repositoryRoot);
+    const shallow = shallowOutput.exitCode === 0 && shallowOutput.stdout.trim() === 'true';
+    const allTags = await git(['tag', '--list'], repositoryRoot);
+    const totalTags = allTags.exitCode === 0 ? allTags.stdout.split('\n').filter(t => t.trim()).length : 0;
+    const merged = await git(['tag', '--merged', 'HEAD'], repositoryRoot);
+    const reachableVersionTags = merged.exitCode === 0 ? countVersionTags(merged.stdout.split('\n'), tagPrefix) : 0;
+    return { gitRoot, shallow, reachableVersionTags, totalTags };
+}
+
+
+/***/ }),
+
 /***/ 9407:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -28129,41 +28226,54 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.run = run;
 const core = __importStar(__nccwpck_require__(7484));
 const exec = __importStar(__nccwpck_require__(5236));
-const glob = __importStar(__nccwpck_require__(7206));
 const path = __importStar(__nccwpck_require__(6928));
+const git_1 = __nccwpck_require__(1243);
+const mrversion_1 = __nccwpck_require__(2390);
+const projects_1 = __nccwpck_require__(7233);
+const tagging_1 = __nccwpck_require__(9352);
+/** Like core.getBooleanInput, but an unset input means `defaultValue` instead of an error. */
+function getBooleanInput(name, defaultValue = false) {
+    return core.getInput(name).trim() === '' ? defaultValue : core.getBooleanInput(name);
+}
 async function run() {
     try {
         const repositoryPath = core.getInput('repository-path') || '.';
         const projectsInput = core.getInput('projects') || '**/*.csproj';
+        const projectsJson = core.getInput('projects-json').trim();
         const tagPrefix = core.getInput('tag-prefix') || 'v';
-        const createGlobalTags = core.getBooleanInput('create-global-tags');
+        const prereleaseType = core.getInput('prerelease-type') || 'none';
+        const configFile = core.getInput('config-file');
+        const forceVersion = core.getInput('force-version');
+        const createGlobalTags = getBooleanInput('create-global-tags');
         const globalTagStrategy = core.getInput('global-tag-strategy') || 'major-only';
         const tagMessageTemplate = core.getInput('tag-message-template') || 'Release {type} {version}';
-        const dryRun = core.getBooleanInput('dry-run');
-        const failOnExisting = core.getBooleanInput('fail-on-existing');
-        const includeTestProjects = core.getBooleanInput('include-test-projects');
-        const includeNonPackable = core.getBooleanInput('include-non-packable');
-        const onlyChanged = core.getBooleanInput('only-changed');
-        const signTags = core.getBooleanInput('sign-tags');
+        const dryRun = getBooleanInput('dry-run');
+        const failOnExisting = getBooleanInput('fail-on-existing');
+        const includeTestProjects = getBooleanInput('include-test-projects');
+        const includeNonPackable = getBooleanInput('include-non-packable');
+        const onlyChanged = getBooleanInput('only-changed', true);
+        const signTags = getBooleanInput('sign-tags');
+        const pushTags = getBooleanInput('push-tags');
+        const allowShallow = getBooleanInput('allow-shallow');
+        const repositoryRoot = path.resolve(repositoryPath);
         core.info('Creating version tags...');
         if (dryRun) {
-            core.info('Running in dry-run mode - no tags will be created');
+            core.info('Running in dry-run mode - no tags will be created or pushed');
         }
-        // Find project files
-        const projectFiles = await findProjectFiles(projectsInput, repositoryPath);
-        core.info(`Found ${projectFiles.length} project files`);
-        if (projectFiles.length === 0) {
-            core.warning('No project files found matching the pattern');
-            return;
+        let projectVersions;
+        if (projectsJson) {
+            // Tag exactly the versions mr-version/calculate produced (same prerelease type, config and forced version)
+            projectVersions = (0, tagging_1.parseProjectsJson)(projectsJson);
+            core.info(`Using ${projectVersions.length} project version(s) from 'projects-json'; ` +
+                `'projects', 'prerelease-type', 'config-file' and 'force-version' are not used`);
         }
-        // Calculate versions for each project
-        const projectVersions = [];
-        for (const projectFile of projectFiles) {
-            const version = await getProjectVersion(projectFile, repositoryPath, tagPrefix);
-            projectVersions.push(version);
+        else {
+            projectVersions = await calculateProjectVersions({
+                repositoryRoot, projectsInput, tagPrefix, prereleaseType, configFile, forceVersion, allowShallow
+            });
         }
         // Filter projects based on settings
-        const filteredProjects = filterProjects(projectVersions, {
+        const filteredProjects = (0, tagging_1.filterProjects)(projectVersions, {
             includeTestProjects,
             includeNonPackable,
             onlyChanged
@@ -28172,7 +28282,7 @@ async function run() {
         // Create tags
         const result = await createTags({
             projects: filteredProjects,
-            repositoryPath,
+            repositoryPath: repositoryRoot,
             tagPrefix,
             createGlobalTags,
             globalTagStrategy,
@@ -28181,16 +28291,33 @@ async function run() {
             failOnExisting,
             signTags
         });
+        const createdTagNames = result.tagsCreated.filter(t => t.created).map(t => t.tagName);
+        const failedTags = result.tagsCreated.filter(t => !t.created && !t.skipped);
+        // Push exactly the tags this run created
+        let pushedTags = [];
+        if (pushTags && !dryRun && createdTagNames.length > 0 && failedTags.length === 0) {
+            await pushCreatedTags(createdTagNames, repositoryRoot);
+            pushedTags = createdTagNames;
+        }
+        else if (pushTags && dryRun && result.tagsCreated.length > 0) {
+            core.info('[DRY RUN] Would push the tags to origin');
+        }
         // Set outputs
         core.setOutput('tags-created', JSON.stringify(result.tagsCreated));
         core.setOutput('global-tags-created', JSON.stringify(result.globalTags));
         core.setOutput('project-tags-created', JSON.stringify(result.projectTags));
         core.setOutput('tags-count', result.totalCount.toString());
         core.setOutput('tags-skipped', result.skippedCount.toString());
+        core.setOutput('tags-pushed', JSON.stringify(pushedTags));
         // Add collapsible summary to job output
-        await addJobSummary(result, dryRun, filteredProjects.length);
+        await addJobSummary(result, dryRun, filteredProjects.length, pushedTags);
+        if (failedTags.length > 0) {
+            core.setFailed(`Failed to create ${failedTags.length} tag(s): ${failedTags.map(t => `${t.tagName} (${t.reason})`).join('; ')}` +
+                (pushTags ? '. No tags were pushed.' : ''));
+            return;
+        }
         const action = dryRun ? 'analyzed' : 'created';
-        core.info(`✅ ${result.totalCount} tags ${action}, ${result.skippedCount} skipped`);
+        core.info(`✅ ${result.totalCount} tags ${action}, ${result.skippedCount} skipped${pushedTags.length > 0 ? `, ${pushedTags.length} pushed` : ''}`);
     }
     catch (error) {
         await core.summary
@@ -28200,55 +28327,52 @@ async function run() {
         core.setFailed(`Failed to create tags: ${error instanceof Error ? error.message : String(error)}`);
     }
 }
-async function findProjectFiles(pattern, repositoryPath) {
-    const globber = await glob.create(pattern, {
-        matchDirectories: false,
-        implicitDescendants: true
+/** Standalone use: calculate the versions like mr-version/calculate does. */
+async function calculateProjectVersions(options) {
+    const history = await (0, git_1.inspectHistory)(options.repositoryRoot, options.tagPrefix);
+    const verdict = (0, git_1.evaluateHistory)(history, options.allowShallow);
+    if (verdict.level === 'error') {
+        throw new Error(verdict.message);
+    }
+    else if (verdict.level === 'warning') {
+        core.warning(verdict.message ?? '');
+    }
+    else if (verdict.level === 'notice') {
+        core.notice(verdict.message ?? '');
+    }
+    const selection = await (0, projects_1.findProjectFiles)(options.projectsInput, options.repositoryRoot);
+    if (selection.outside.length > 0) {
+        core.info(`Ignored ${selection.outside.length} project file(s) outside ${options.repositoryRoot}: ${selection.outside.join(', ')}`);
+    }
+    core.info(`Found ${selection.files.length} project files`);
+    const calculation = await (0, mrversion_1.calculateVersions)({
+        repositoryRoot: options.repositoryRoot,
+        gitRoot: history.gitRoot,
+        projectFiles: selection.files,
+        prereleaseType: options.prereleaseType,
+        tagPrefix: options.tagPrefix,
+        forceVersion: options.forceVersion,
+        configFile: options.configFile
     });
-    const files = await globber.glob();
-    // Filter to only include actual project files
-    return files.filter(file => file.endsWith('.csproj') ||
-        file.endsWith('.vbproj') ||
-        file.endsWith('.fsproj')).map(file => path.resolve(repositoryPath, file));
+    core.info(`Calculated ${calculation.projects.length} project versions (${calculation.mode}${calculation.reason ? `: ${calculation.reason}` : ''})`);
+    return calculation.projects;
 }
-async function getProjectVersion(projectFile, repositoryPath, tagPrefix) {
-    const args = [
-        'version',
-        '--repo', repositoryPath,
-        '--project', projectFile,
-        '--tag-prefix', tagPrefix,
-        '--json'
-    ];
-    const output = await exec.getExecOutput('mr-version', args, {
+async function pushCreatedTags(tagNames, repositoryPath) {
+    const args = (0, tagging_1.buildPushArgs)(tagNames);
+    core.info(`Pushing ${tagNames.length} tag(s): git ${args.join(' ')}`);
+    const output = await exec.getExecOutput('git', args, {
+        cwd: repositoryPath,
         silent: true,
         ignoreReturnCode: true
     });
     if (output.exitCode !== 0) {
-        throw new Error(`mr-version failed for ${projectFile}: ${output.stderr}`);
+        throw new Error(`'git ${args.join(' ')}' failed with exit code ${output.exitCode}. The tags were created locally only. ` +
+            `Make sure the job has 'permissions: contents: write' and actions/checkout kept its credentials ` +
+            `(persist-credentials: true, the default).\n` +
+            `${output.stderr.trim()}${output.stdout.trim() ? `\n${output.stdout.trim()}` : ''}`);
     }
-    try {
-        return JSON.parse(output.stdout);
-    }
-    catch (error) {
-        throw new Error(`Failed to parse mr-version output for ${projectFile}: ${error}`);
-    }
-}
-function filterProjects(projects, options) {
-    return projects.filter(project => {
-        // Filter test projects
-        if (!options.includeTestProjects && project.isTestProject) {
-            return false;
-        }
-        // Filter non-packable projects
-        if (!options.includeNonPackable && !project.isPackable) {
-            return false;
-        }
-        // Filter unchanged projects
-        if (options.onlyChanged && !project.versionChanged) {
-            return false;
-        }
-        return true;
-    });
+    for (const name of tagNames)
+        core.info(`Pushed tag: ${name}`);
 }
 async function createTags(options) {
     const result = {
@@ -28260,11 +28384,8 @@ async function createTags(options) {
     };
     // Create project-specific tags
     for (const project of options.projects) {
-        const projectTag = `${project.project.toLowerCase()}/${options.tagPrefix}${project.version}`;
-        const message = options.tagMessageTemplate
-            .replace('{version}', project.version)
-            .replace('{project}', project.project)
-            .replace('{type}', project.project);
+        const projectTag = (0, tagging_1.projectTagName)(project.project, options.tagPrefix, project.version);
+        const message = (0, tagging_1.formatTagMessage)(options.tagMessageTemplate, project.version, project.project, project.project);
         const tagInfo = await createTag({
             tagName: projectTag,
             message,
@@ -28281,18 +28402,15 @@ async function createTags(options) {
         if (tagInfo.created) {
             result.totalCount++;
         }
-        else {
+        else if (tagInfo.skipped) {
             result.skippedCount++;
         }
     }
     // Create global tags if enabled
     if (options.createGlobalTags) {
-        const globalTags = determineGlobalTags(options.projects, options.globalTagStrategy, options.tagPrefix);
+        const globalTags = (0, tagging_1.determineGlobalTags)(options.projects, options.globalTagStrategy, options.tagPrefix);
         for (const globalTag of globalTags) {
-            const message = options.tagMessageTemplate
-                .replace('{version}', globalTag.version)
-                .replace('{project}', 'Global')
-                .replace('{type}', 'Global');
+            const message = (0, tagging_1.formatTagMessage)(options.tagMessageTemplate, globalTag.version, 'Global', 'Global');
             const tagInfo = await createTag({
                 tagName: globalTag.tagName,
                 message,
@@ -28309,46 +28427,12 @@ async function createTags(options) {
             if (tagInfo.created) {
                 result.totalCount++;
             }
-            else {
+            else if (tagInfo.skipped) {
                 result.skippedCount++;
             }
         }
     }
     return result;
-}
-function determineGlobalTags(projects, strategy, tagPrefix) {
-    const globalTags = [];
-    for (const project of projects) {
-        const version = project.version;
-        const versionParts = version.split('.');
-        if (versionParts.length < 3)
-            continue;
-        const minor = parseInt(versionParts[1]);
-        const patch = parseInt(versionParts[2]);
-        let shouldCreateGlobalTag = false;
-        switch (strategy.toLowerCase()) {
-            case 'major-only':
-                shouldCreateGlobalTag = minor === 0 && patch === 0;
-                break;
-            case 'all':
-                shouldCreateGlobalTag = true;
-                break;
-            case 'none':
-                shouldCreateGlobalTag = false;
-                break;
-        }
-        if (shouldCreateGlobalTag) {
-            const globalTagName = `${tagPrefix}${version}`;
-            // Avoid duplicates
-            if (!globalTags.some(tag => tag.tagName === globalTagName)) {
-                globalTags.push({
-                    tagName: globalTagName,
-                    version: version
-                });
-            }
-        }
-    }
-    return globalTags;
 }
 async function createTag(options) {
     const tagInfo = {
@@ -28418,15 +28502,14 @@ async function createTag(options) {
             ignoreReturnCode: true
         });
         if (output.exitCode !== 0) {
-            throw new Error(`Git tag creation failed: ${output.stderr}`);
+            throw new Error(`git tag failed: ${(output.stderr || output.stdout).trim()}`);
         }
         tagInfo.created = true;
         core.info(`Created tag: ${options.tagName}`);
     }
     catch (error) {
-        tagInfo.skipped = true;
-        tagInfo.reason = `Failed to create: ${error}`;
-        core.error(`Failed to create tag ${options.tagName}: ${error}`);
+        tagInfo.reason = `Failed to create: ${error instanceof Error ? error.message : String(error)}`;
+        core.error(`Failed to create tag ${options.tagName}: ${error instanceof Error ? error.message : String(error)}`);
     }
     return tagInfo;
 }
@@ -28446,7 +28529,7 @@ async function checkTagExists(tagName, repositoryPath) {
 const asTableHeaderRow = (...data) => data.map(d => asSummaryTableCell(d, true));
 const asTableRow = (...data) => data.map(d => asSummaryTableCell(`${d}`, false));
 const asSummaryTableCell = (data, header) => ({ data, header: header ?? false });
-async function addJobSummary(result, dryRun, totalProjects) {
+async function addJobSummary(result, dryRun, totalProjects, pushedTags) {
     const createdTags = result.tagsCreated.filter(t => t.created);
     const skippedTags = result.tagsCreated.filter(t => t.skipped);
     const failedTags = result.tagsCreated.filter(t => !t.created && !t.skipped);
@@ -28457,6 +28540,8 @@ async function addJobSummary(result, dryRun, totalProjects) {
         `- **Project Tags**: ${result.projectTags.length}\n` +
         `- **Global Tags**: ${result.globalTags.length}\n` +
         `- **Skipped Tags**: ${result.skippedCount}\n` +
+        `- **Failed Tags**: ${failedTags.length}\n` +
+        `- **Pushed Tags**: ${pushedTags.length > 0 ? pushedTags.map(t => `\`${t}\``).join(', ') : 'none'}\n` +
         `- **Mode**: ${dryRun ? '🧪 Dry Run' : '🚀 Live'}`);
     if (createdTags.length > 0) {
         await core.summary
@@ -28476,7 +28561,7 @@ async function addJobSummary(result, dryRun, totalProjects) {
             asTableHeaderRow('Tag', 'Type', 'Project', 'Version', 'Status')
         ];
         for (const tag of result.tagsCreated) {
-            const status = tag.created ? '✅ Created' : (tag.skipped ? `⏭️ Skipped: ${tag.reason}` : '❌ Failed');
+            const status = tag.created ? '✅ Created' : (tag.skipped ? `⏭️ Skipped: ${tag.reason}` : `❌ Failed: ${tag.reason}`);
             const type = tag.isGlobal ? 'Global' : 'Project';
             tableLines.push(asTableRow(tag.tagName, type, tag.projectName, tag.version, status));
         }
@@ -28486,7 +28571,7 @@ async function addJobSummary(result, dryRun, totalProjects) {
         '| Tag | Type | Project | Version | Status |\n' +
             '|-----|------|---------|---------|--------|\n' +
             result.tagsCreated.map(tag => {
-                const status = tag.created ? '✅ Created' : (tag.skipped ? `⏭️ Skipped: ${tag.reason}` : '❌ Failed');
+                const status = tag.created ? '✅ Created' : (tag.skipped ? `⏭️ Skipped: ${tag.reason}` : `❌ Failed: ${tag.reason}`);
                 const type = tag.isGlobal ? 'Global' : 'Project';
                 return `| \`${tag.tagName}\` | ${type} | ${tag.projectName} | \`${tag.version}\` | ${status} |`;
             }).join('\n'));
@@ -28500,6 +28585,570 @@ async function addJobSummary(result, dryRun, totalProjects) {
 // Run the action
 if (require.main === require.cache[eval('__filename')]) {
     run();
+}
+
+
+/***/ }),
+
+/***/ 2390:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.DEFAULT_CONFIG_FILES = void 0;
+exports.findDefaultConfig = findDefaultConfig;
+exports.reportBlockers = reportBlockers;
+exports.buildReportArgs = buildReportArgs;
+exports.buildVersionArgs = buildVersionArgs;
+exports.formatCliFailure = formatCliFailure;
+exports.parseCliJson = parseCliJson;
+exports.parseReportOutput = parseReportOutput;
+exports.mapReportProject = mapReportProject;
+exports.matchReportProjects = matchReportProjects;
+exports.calculateProjectVersion = calculateProjectVersion;
+exports.mapLimit = mapLimit;
+exports.calculateVersions = calculateVersions;
+const core = __importStar(__nccwpck_require__(7484));
+const exec = __importStar(__nccwpck_require__(5236));
+const fs = __importStar(__nccwpck_require__(9896));
+const os = __importStar(__nccwpck_require__(857));
+const path = __importStar(__nccwpck_require__(6928));
+const projects_1 = __nccwpck_require__(7233);
+/** Config files mr-version auto-discovers in the repository root (ConfigurationService.DefaultConfigFiles). */
+exports.DEFAULT_CONFIG_FILES = ['mr-version.yml', 'mr-version.yaml', 'mister-version.yml', 'mister-version.yaml'];
+function findDefaultConfig(gitRoot) {
+    return exports.DEFAULT_CONFIG_FILES.map(name => path.join(gitRoot, name)).find(file => fs.existsSync(file));
+}
+/**
+ * Reasons the single `mr-version report` call cannot reproduce `mr-version version`: report has no
+ * --prerelease-type/--force-version options, and it applies only part of mr-version.yml (no commit
+ * conventions, change detection, CalVer, constraints, ...), so any configuration file forces the
+ * per-project path. Returns [] when report gives the same versions.
+ */
+function reportBlockers(options, defaultConfig) {
+    const blockers = [];
+    if (options.prereleaseType && options.prereleaseType.toLowerCase() !== 'none') {
+        blockers.push(`prerelease-type '${options.prereleaseType}'`);
+    }
+    if (options.forceVersion)
+        blockers.push('force-version');
+    if (options.configFile)
+        blockers.push(`config-file '${options.configFile}'`);
+    else if (defaultConfig)
+        blockers.push(`configuration file '${path.basename(defaultConfig)}'`);
+    return blockers;
+}
+function buildReportArgs(options) {
+    return [
+        'report',
+        '--repo', options.repositoryRoot,
+        '--output', 'json',
+        '--include-test-projects',
+        '--include-non-packable',
+        '--tag-prefix', options.tagPrefix
+    ];
+}
+function buildVersionArgs(options, projectFile) {
+    const args = ['version', '--repo', options.repositoryRoot, '--project', projectFile, '--json'];
+    if (options.prereleaseType && options.prereleaseType.toLowerCase() !== 'none') {
+        args.push('--prerelease-type', options.prereleaseType);
+    }
+    if (options.tagPrefix)
+        args.push('--tag-prefix', options.tagPrefix);
+    if (options.forceVersion)
+        args.push('--force-version', options.forceVersion);
+    if (options.configFile)
+        args.push('--config-file', options.configFile);
+    return args;
+}
+function truncate(text, max = 4000) {
+    return text.length > max ? `${text.slice(0, max)}\n... (${text.length - max} more characters)` : text;
+}
+/** Error text for a failed mr-version call; includes stdout too, because the CLI prints usage errors there. */
+function formatCliFailure(what, args, output) {
+    const lines = [`${what}: 'mr-version ${args.join(' ')}' exited with code ${output.exitCode}`];
+    const stderr = output.stderr.trim();
+    const stdout = output.stdout.trim();
+    if (stderr)
+        lines.push(`stderr:\n${truncate(stderr)}`);
+    if (stdout)
+        lines.push(`stdout:\n${truncate(stdout)}`);
+    if (!stderr && !stdout)
+        lines.push('(no output)');
+    return lines.join('\n');
+}
+async function runMrVersion(args) {
+    try {
+        return await exec.getExecOutput('mr-version', args, { silent: true, ignoreReturnCode: true });
+    }
+    catch (error) {
+        throw new Error(`Could not run mr-version (${error instanceof Error ? error.message : String(error)}). ` +
+            `Install it first, e.g. with the mr-version/setup action.`);
+    }
+}
+/** Parses the JSON object printed by the CLI, tolerating log lines before it. */
+function parseCliJson(stdout) {
+    const text = stdout.trim();
+    if (!text)
+        throw new Error('mr-version returned empty output');
+    try {
+        return JSON.parse(text);
+    }
+    catch (error) {
+        const start = text.search(/^\{/m);
+        if (start > 0)
+            return JSON.parse(text.slice(start));
+        throw error;
+    }
+}
+function parseReportOutput(stdout) {
+    const report = parseCliJson(stdout);
+    if (!report || !Array.isArray(report.projects)) {
+        throw new Error("mr-version report output has no 'projects' array");
+    }
+    return report;
+}
+function reportProjectFullPath(project, reportRoot) {
+    if (project.fullPath)
+        return project.fullPath;
+    if (project.path)
+        return path.resolve(reportRoot, project.path);
+    return undefined;
+}
+function mapReportProject(project, projectFile, pathByName) {
+    const version = project.version ?? {};
+    return {
+        project: project.name,
+        path: projectFile,
+        version: version.version ?? '',
+        previousVersion: version.previousVersion ?? null,
+        versionChanged: version.versionChanged === true,
+        changeReason: version.changeReason ?? null,
+        commitSha: version.commitSha ?? null,
+        commitDate: version.commitDate ?? null,
+        commitMessage: version.commitMessage ?? null,
+        branchType: version.branchType ?? null,
+        branchName: version.branchName ?? null,
+        commitHeight: version.commitHeight ?? null,
+        isTestProject: project.isTestProject === true,
+        isPackable: project.isPackable !== false,
+        // `version --json` lists the transitive dependencies as project file paths
+        dependencies: (project.dependencies?.all ?? []).map(dep => pathByName.get(dep.name) ?? dep.name),
+        validation: null
+    };
+}
+/**
+ * Maps report projects onto the requested project files (matched by real path). Returns the mapped
+ * versions in projectFiles order (undefined where the report has no usable entry).
+ */
+function matchReportProjects(report, projectFiles, reportRoot) {
+    const byPath = new Map();
+    const pathByName = new Map();
+    for (const project of report.projects) {
+        const fullPath = reportProjectFullPath(project, report.repository ?? reportRoot);
+        if (!fullPath || !project.name)
+            continue;
+        byPath.set((0, projects_1.realpathOrSelf)(fullPath), project);
+        if (!pathByName.has(project.name))
+            pathByName.set(project.name, fullPath);
+    }
+    return projectFiles.map(file => {
+        const project = byPath.get((0, projects_1.realpathOrSelf)(file));
+        if (!project || !project.version?.version)
+            return undefined;
+        return mapReportProject(project, file, pathByName);
+    });
+}
+async function calculateViaReport(options) {
+    const args = buildReportArgs(options);
+    const output = await runMrVersion(args);
+    if (output.exitCode !== 0) {
+        throw new Error(formatCliFailure('mr-version report failed', args, output));
+    }
+    core.debug(`mr-version report stderr:\n${output.stderr}`);
+    let report;
+    try {
+        report = parseReportOutput(output.stdout);
+    }
+    catch (error) {
+        throw new Error(`Failed to parse 'mr-version report' output: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return matchReportProjects(report, options.projectFiles, options.gitRoot);
+}
+async function calculateProjectVersion(options, projectFile) {
+    const args = buildVersionArgs(options, projectFile);
+    const output = await runMrVersion(args);
+    if (output.exitCode !== 0) {
+        throw new Error(formatCliFailure(`mr-version failed for ${projectFile}`, args, output));
+    }
+    let result;
+    try {
+        result = parseCliJson(output.stdout);
+    }
+    catch (error) {
+        throw new Error(`Failed to parse mr-version output for ${projectFile}: ${error instanceof Error ? error.message : String(error)}\n` +
+            `stdout:\n${truncate(output.stdout.trim())}\nstderr:\n${truncate(output.stderr.trim())}`);
+    }
+    return { ...result, path: projectFile };
+}
+/** Runs fn over items with at most `limit` in flight, keeping the input order in the result. */
+async function mapLimit(items, limit, fn) {
+    const results = new Array(items.length);
+    let next = 0;
+    const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+        while (next < items.length) {
+            const index = next++;
+            results[index] = await fn(items[index]);
+        }
+    });
+    await Promise.all(workers);
+    return results;
+}
+function parallelism() {
+    const cpus = typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length;
+    return Math.max(1, Math.min(4, cpus));
+}
+/**
+ * Calculates the versions of options.projectFiles. Uses one `mr-version report` call (which analyses every
+ * project in a single process) when that yields the same versions as `mr-version version`; otherwise, or for
+ * projects the report does not cover, or if report fails, runs `mr-version version --json` per project.
+ */
+async function calculateVersions(options) {
+    const blockers = reportBlockers(options, options.configFile ? undefined : findDefaultConfig(options.gitRoot));
+    let fromReport;
+    let reason;
+    if (blockers.length === 0) {
+        try {
+            fromReport = await calculateViaReport(options);
+        }
+        catch (error) {
+            reason = `mr-version report failed`;
+            core.warning(`Falling back to one 'mr-version version' call per project: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+    else {
+        reason = `${blockers.join(', ')} ${blockers.length === 1 ? 'is' : 'are'} not supported by 'mr-version report'`;
+        core.info(`Calculating versions with one 'mr-version version' call per project: ${reason}`);
+    }
+    const missing = options.projectFiles.filter((_, index) => !fromReport?.[index]);
+    if (fromReport && missing.length > 0) {
+        core.info(`mr-version report did not cover ${missing.length} project(s); calculating them individually: ${missing.join(', ')}`);
+    }
+    const individual = await mapLimit(missing, parallelism(), file => calculateProjectVersion(options, file));
+    const individualByFile = new Map(missing.map((file, index) => [file, individual[index]]));
+    const projects = options.projectFiles.map((file, index) => fromReport?.[index] ?? individualByFile.get(file));
+    const mode = !fromReport ? 'per-project' : missing.length > 0 ? 'report+per-project' : 'report';
+    if (mode === 'report+per-project')
+        reason = `mr-version report did not cover ${missing.length} project(s)`;
+    return { projects, mode, reason };
+}
+
+
+/***/ }),
+
+/***/ 7233:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PROJECT_EXTENSIONS = void 0;
+exports.parseProjectPatterns = parseProjectPatterns;
+exports.resolvePatterns = resolvePatterns;
+exports.isWithin = isWithin;
+exports.isProjectFile = isProjectFile;
+exports.realpathOrSelf = realpathOrSelf;
+exports.selectProjectFiles = selectProjectFiles;
+exports.findProjectFiles = findProjectFiles;
+const glob = __importStar(__nccwpck_require__(7206));
+const fs = __importStar(__nccwpck_require__(9896));
+const path = __importStar(__nccwpck_require__(6928));
+exports.PROJECT_EXTENSIONS = ['.csproj', '.vbproj', '.fsproj'];
+/**
+ * Splits the `projects` input into glob patterns. Entries may be separated by commas and/or newlines
+ * (the documented "glob pattern or comma-separated list"); each entry is trimmed and blank entries and
+ * `#` comment lines are dropped. A leading `!` excludes matches, as in @actions/glob.
+ */
+function parseProjectPatterns(input) {
+    return input
+        .split(/[,\r\n]+/)
+        .map(entry => entry.trim())
+        .filter(entry => entry.length > 0 && !entry.startsWith('#'));
+}
+/**
+ * Makes each pattern absolute, resolving relative patterns against the repository root (not the process
+ * working directory), and keeps any leading `!` negation.
+ */
+function resolvePatterns(patterns, root) {
+    return patterns.map(pattern => {
+        const negation = /^!+/.exec(pattern)?.[0] ?? '';
+        const body = pattern.slice(negation.length).trim();
+        if (path.isAbsolute(body) || body.startsWith('~')) {
+            return negation + body;
+        }
+        return negation + path.join(root, body);
+    });
+}
+/** True when `file` is strictly inside `root`. */
+function isWithin(root, file) {
+    const relative = path.relative(root, file);
+    return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+function isProjectFile(file) {
+    return exports.PROJECT_EXTENSIONS.some(extension => file.endsWith(extension));
+}
+function realpathOrSelf(file) {
+    try {
+        return fs.realpathSync(file);
+    }
+    catch {
+        return path.resolve(file);
+    }
+}
+/**
+ * Keeps project files (.csproj/.vbproj/.fsproj) that are inside `root` (compared by real path, so a
+ * symlink pointing out of the repository is dropped too), removes duplicates and sorts them.
+ */
+function selectProjectFiles(files, root) {
+    const realRoot = realpathOrSelf(root);
+    const seen = new Set();
+    const selected = [];
+    const outside = [];
+    for (const file of files) {
+        if (!isProjectFile(file))
+            continue;
+        const absolute = path.resolve(root, file);
+        const real = realpathOrSelf(absolute);
+        if (!isWithin(realRoot, real)) {
+            outside.push(absolute);
+            continue;
+        }
+        if (seen.has(real))
+            continue;
+        seen.add(real);
+        selected.push(absolute);
+    }
+    selected.sort();
+    return { files: selected, outside };
+}
+/**
+ * Finds the project files selected by the `projects` input, relative to the repository root.
+ * Throws when the input has no patterns or nothing inside the repository matches, so a typo fails the
+ * step instead of silently producing no (or made-up) versions.
+ */
+async function findProjectFiles(projectsInput, repositoryPath) {
+    const root = path.resolve(repositoryPath);
+    const patterns = parseProjectPatterns(projectsInput);
+    if (patterns.length === 0) {
+        throw new Error(`The 'projects' input contains no patterns: ${JSON.stringify(projectsInput)}`);
+    }
+    const globber = await glob.create(resolvePatterns(patterns, root).join('\n'), {
+        matchDirectories: false,
+        implicitDescendants: true
+    });
+    const selection = selectProjectFiles(await globber.glob(), root);
+    if (selection.files.length === 0) {
+        const outsideNote = selection.outside.length > 0
+            ? ` (${selection.outside.length} matching project file(s) outside the repository were ignored: ${selection.outside.slice(0, 5).join(', ')})`
+            : '';
+        throw new Error(`No project files (${exports.PROJECT_EXTENSIONS.join(', ')}) matched the 'projects' input ${JSON.stringify(patterns)} ` +
+            `under repository-path '${root}'${outsideNote}. Patterns are relative to repository-path and may be separated by commas or newlines.`);
+    }
+    return selection;
+}
+
+
+/***/ }),
+
+/***/ 9352:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.parseProjectsJson = parseProjectsJson;
+exports.filterProjects = filterProjects;
+exports.projectTagName = projectTagName;
+exports.formatTagMessage = formatTagMessage;
+exports.determineGlobalTags = determineGlobalTags;
+exports.buildPushArgs = buildPushArgs;
+const version_1 = __nccwpck_require__(311);
+/**
+ * Parses the `projects-json` input: the `projects` (or `changed-projects`) output of mr-version/calculate,
+ * a JSON array of { project, version, versionChanged, isTestProject, isPackable, ... }.
+ */
+function parseProjectsJson(input) {
+    let parsed;
+    try {
+        parsed = JSON.parse(input);
+    }
+    catch (error) {
+        throw new Error(`The 'projects-json' input is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!Array.isArray(parsed)) {
+        throw new Error("The 'projects-json' input must be a JSON array (the 'projects' output of mr-version/calculate)");
+    }
+    return parsed.map((entry, index) => {
+        const item = entry;
+        if (!item || typeof item !== 'object' || typeof item.project !== 'string' || !item.project ||
+            typeof item.version !== 'string' || !item.version) {
+            throw new Error(`'projects-json' entry ${index} needs non-empty string 'project' and 'version' fields: ${JSON.stringify(entry)}`);
+        }
+        return {
+            ...item,
+            project: item.project,
+            path: typeof item.path === 'string' ? item.path : '',
+            version: item.version,
+            versionChanged: item.versionChanged === true,
+            isTestProject: item.isTestProject === true,
+            isPackable: item.isPackable !== false,
+            dependencies: Array.isArray(item.dependencies) ? item.dependencies : []
+        };
+    });
+}
+function filterProjects(projects, options) {
+    return projects.filter(project => {
+        if (!options.includeTestProjects && project.isTestProject)
+            return false;
+        if (!options.includeNonPackable && !project.isPackable)
+            return false;
+        if (options.onlyChanged && !project.versionChanged)
+            return false;
+        return true;
+    });
+}
+/** Project tag name, e.g. "lib2/v1.1.1-rc.1" (the form mr-version reads back as the project's version). */
+function projectTagName(projectName, tagPrefix, version) {
+    return `${projectName.toLowerCase()}/${tagPrefix}${version}`;
+}
+function formatTagMessage(template, version, project, type) {
+    return template.split('{version}').join(version).split('{project}').join(project).split('{type}').join(type);
+}
+function determineGlobalTags(projects, strategy, tagPrefix) {
+    const globalTags = [];
+    for (const project of projects) {
+        const parts = (0, version_1.parseVersion)(project.version);
+        if (!parts)
+            continue;
+        let shouldCreateGlobalTag = false;
+        switch (strategy.toLowerCase()) {
+            case 'major-only':
+                shouldCreateGlobalTag = parts.minor === '0' && parts.patch === '0';
+                break;
+            case 'all':
+                shouldCreateGlobalTag = true;
+                break;
+            case 'none':
+                shouldCreateGlobalTag = false;
+                break;
+        }
+        const tagName = `${tagPrefix}${project.version}`;
+        if (shouldCreateGlobalTag && !globalTags.some(tag => tag.tagName === tagName)) {
+            globalTags.push({ tagName, version: project.version });
+        }
+    }
+    return globalTags;
+}
+/** `git push` arguments that push exactly the given tags (never --tags, which would push every local tag). */
+function buildPushArgs(tagNames, remote = 'origin') {
+    return ['push', remote, ...tagNames.map(name => `refs/tags/${name}`)];
+}
+
+
+/***/ }),
+
+/***/ 311:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.parseVersion = parseVersion;
+exports.selectPrimaryProject = selectPrimaryProject;
+const VERSION_PATTERN = /^(\d+)\.(\d+)\.(\d+)(?:-([^+]+))?(?:\+(.*))?$/;
+/** Splits a semantic version into its parts; returns null when it is not MAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]. */
+function parseVersion(version) {
+    const match = VERSION_PATTERN.exec(version.trim());
+    if (!match)
+        return null;
+    return {
+        major: match[1],
+        minor: match[2],
+        patch: match[3],
+        prerelease: match[4] ?? '',
+        buildMetadata: match[5] ?? ''
+    };
+}
+/** The project whose version feeds the single-version outputs: the first changed project, else the first project. */
+function selectPrimaryProject(changedProjects, projects) {
+    return changedProjects[0] ?? projects[0];
 }
 
 
