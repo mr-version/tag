@@ -1,21 +1,18 @@
 import * as core from '@actions/core'
 import { SummaryTableCell, SummaryTableRow } from '@actions/core/lib/summary'
 import * as exec from '@actions/exec'
-import * as glob from '@actions/glob'
 import * as path from 'path'
-
-interface ProjectVersion {
-  project: string
-  path: string
-  version: string
-  versionChanged: boolean
-  changeReason?: string
-  branchType?: string
-  branchName?: string
-  isTestProject: boolean
-  isPackable: boolean
-  dependencies: string[]
-}
+import { evaluateHistory, inspectHistory } from './git'
+import { ProjectVersion, calculateVersions } from './mrversion'
+import { findProjectFiles } from './projects'
+import {
+  buildPushArgs,
+  determineGlobalTags,
+  filterProjects,
+  formatTagMessage,
+  parseProjectsJson,
+  projectTagName
+} from './tagging'
 
 interface TagInfo {
   tagName: string
@@ -36,41 +33,51 @@ interface TagCreationResult {
   skippedCount: number
 }
 
+/** Like core.getBooleanInput, but an unset input means `defaultValue` instead of an error. */
+function getBooleanInput(name: string, defaultValue = false): boolean {
+  return core.getInput(name).trim() === '' ? defaultValue : core.getBooleanInput(name)
+}
+
 async function run(): Promise<void> {
   try {
     const repositoryPath = core.getInput('repository-path') || '.'
     const projectsInput = core.getInput('projects') || '**/*.csproj'
+    const projectsJson = core.getInput('projects-json').trim()
     const tagPrefix = core.getInput('tag-prefix') || 'v'
-    const createGlobalTags = core.getBooleanInput('create-global-tags')
+    const prereleaseType = core.getInput('prerelease-type') || 'none'
+    const configFile = core.getInput('config-file')
+    const forceVersion = core.getInput('force-version')
+    const createGlobalTags = getBooleanInput('create-global-tags')
     const globalTagStrategy = core.getInput('global-tag-strategy') || 'major-only'
     const tagMessageTemplate = core.getInput('tag-message-template') || 'Release {type} {version}'
-    const dryRun = core.getBooleanInput('dry-run')
-    const failOnExisting = core.getBooleanInput('fail-on-existing')
-    const includeTestProjects = core.getBooleanInput('include-test-projects')
-    const includeNonPackable = core.getBooleanInput('include-non-packable')
-    const onlyChanged = core.getBooleanInput('only-changed')
-    const signTags = core.getBooleanInput('sign-tags')
+    const dryRun = getBooleanInput('dry-run')
+    const failOnExisting = getBooleanInput('fail-on-existing')
+    const includeTestProjects = getBooleanInput('include-test-projects')
+    const includeNonPackable = getBooleanInput('include-non-packable')
+    const onlyChanged = getBooleanInput('only-changed', true)
+    const signTags = getBooleanInput('sign-tags')
+    const pushTags = getBooleanInput('push-tags')
+    const allowShallow = getBooleanInput('allow-shallow')
+    const repositoryRoot = path.resolve(repositoryPath)
 
     core.info('Creating version tags...')
 
     if (dryRun) {
-      core.info('Running in dry-run mode - no tags will be created')
+      core.info('Running in dry-run mode - no tags will be created or pushed')
     }
 
-    // Find project files
-    const projectFiles = await findProjectFiles(projectsInput, repositoryPath)
-    core.info(`Found ${projectFiles.length} project files`)
-
-    if (projectFiles.length === 0) {
-      core.warning('No project files found matching the pattern')
-      return
-    }
-
-    // Calculate versions for each project
-    const projectVersions: ProjectVersion[] = []
-    for (const projectFile of projectFiles) {
-      const version = await getProjectVersion(projectFile, repositoryPath, tagPrefix)
-      projectVersions.push(version)
+    let projectVersions: ProjectVersion[]
+    if (projectsJson) {
+      // Tag exactly the versions mr-version/calculate produced (same prerelease type, config and forced version)
+      projectVersions = parseProjectsJson(projectsJson)
+      core.info(
+        `Using ${projectVersions.length} project version(s) from 'projects-json'; ` +
+        `'projects', 'prerelease-type', 'config-file' and 'force-version' are not used`
+      )
+    } else {
+      projectVersions = await calculateProjectVersions({
+        repositoryRoot, projectsInput, tagPrefix, prereleaseType, configFile, forceVersion, allowShallow
+      })
     }
 
     // Filter projects based on settings
@@ -85,7 +92,7 @@ async function run(): Promise<void> {
     // Create tags
     const result = await createTags({
       projects: filteredProjects,
-      repositoryPath,
+      repositoryPath: repositoryRoot,
       tagPrefix,
       createGlobalTags,
       globalTagStrategy,
@@ -95,18 +102,39 @@ async function run(): Promise<void> {
       signTags
     })
 
+    const createdTagNames = result.tagsCreated.filter(t => t.created).map(t => t.tagName)
+    const failedTags = result.tagsCreated.filter(t => !t.created && !t.skipped)
+
+    // Push exactly the tags this run created
+    let pushedTags: string[] = []
+    if (pushTags && !dryRun && createdTagNames.length > 0 && failedTags.length === 0) {
+      await pushCreatedTags(createdTagNames, repositoryRoot)
+      pushedTags = createdTagNames
+    } else if (pushTags && dryRun && result.tagsCreated.length > 0) {
+      core.info('[DRY RUN] Would push the tags to origin')
+    }
+
     // Set outputs
     core.setOutput('tags-created', JSON.stringify(result.tagsCreated))
     core.setOutput('global-tags-created', JSON.stringify(result.globalTags))
     core.setOutput('project-tags-created', JSON.stringify(result.projectTags))
     core.setOutput('tags-count', result.totalCount.toString())
     core.setOutput('tags-skipped', result.skippedCount.toString())
+    core.setOutput('tags-pushed', JSON.stringify(pushedTags))
 
     // Add collapsible summary to job output
-    await addJobSummary(result, dryRun, filteredProjects.length)
+    await addJobSummary(result, dryRun, filteredProjects.length, pushedTags)
+
+    if (failedTags.length > 0) {
+      core.setFailed(
+        `Failed to create ${failedTags.length} tag(s): ${failedTags.map(t => `${t.tagName} (${t.reason})`).join('; ')}` +
+        (pushTags ? '. No tags were pushed.' : '')
+      )
+      return
+    }
 
     const action = dryRun ? 'analyzed' : 'created'
-    core.info(`✅ ${result.totalCount} tags ${action}, ${result.skippedCount} skipped`)
+    core.info(`✅ ${result.totalCount} tags ${action}, ${result.skippedCount} skipped${pushedTags.length > 0 ? `, ${pushedTags.length} pushed` : ''}`)
 
   } catch (error) {
     await core.summary
@@ -120,72 +148,64 @@ async function run(): Promise<void> {
   }
 }
 
-async function findProjectFiles(pattern: string, repositoryPath: string): Promise<string[]> {
-  const globber = await glob.create(pattern, {
-    matchDirectories: false,
-    implicitDescendants: true
-  })
-
-  const files = await globber.glob()
-
-  // Filter to only include actual project files
-  return files.filter(file =>
-    file.endsWith('.csproj') ||
-    file.endsWith('.vbproj') ||
-    file.endsWith('.fsproj')
-  ).map(file => path.resolve(repositoryPath, file))
+interface CalculateOptions {
+  repositoryRoot: string
+  projectsInput: string
+  tagPrefix: string
+  prereleaseType: string
+  configFile: string
+  forceVersion: string
+  allowShallow: boolean
 }
 
-async function getProjectVersion(projectFile: string, repositoryPath: string, tagPrefix: string): Promise<ProjectVersion> {
-  const args = [
-    'version',
-    '--repo', repositoryPath,
-    '--project', projectFile,
-    '--tag-prefix', tagPrefix,
-    '--json'
-  ]
+/** Standalone use: calculate the versions like mr-version/calculate does. */
+async function calculateProjectVersions(options: CalculateOptions): Promise<ProjectVersion[]> {
+  const history = await inspectHistory(options.repositoryRoot, options.tagPrefix)
+  const verdict = evaluateHistory(history, options.allowShallow)
+  if (verdict.level === 'error') {
+    throw new Error(verdict.message)
+  } else if (verdict.level === 'warning') {
+    core.warning(verdict.message ?? '')
+  } else if (verdict.level === 'notice') {
+    core.notice(verdict.message ?? '')
+  }
 
-  const output = await exec.getExecOutput('mr-version', args, {
+  const selection = await findProjectFiles(options.projectsInput, options.repositoryRoot)
+  if (selection.outside.length > 0) {
+    core.info(`Ignored ${selection.outside.length} project file(s) outside ${options.repositoryRoot}: ${selection.outside.join(', ')}`)
+  }
+  core.info(`Found ${selection.files.length} project files`)
+
+  const calculation = await calculateVersions({
+    repositoryRoot: options.repositoryRoot,
+    gitRoot: history.gitRoot,
+    projectFiles: selection.files,
+    prereleaseType: options.prereleaseType,
+    tagPrefix: options.tagPrefix,
+    forceVersion: options.forceVersion,
+    configFile: options.configFile
+  })
+  core.info(`Calculated ${calculation.projects.length} project versions (${calculation.mode}${calculation.reason ? `: ${calculation.reason}` : ''})`)
+  return calculation.projects
+}
+
+async function pushCreatedTags(tagNames: string[], repositoryPath: string): Promise<void> {
+  const args = buildPushArgs(tagNames)
+  core.info(`Pushing ${tagNames.length} tag(s): git ${args.join(' ')}`)
+  const output = await exec.getExecOutput('git', args, {
+    cwd: repositoryPath,
     silent: true,
     ignoreReturnCode: true
   })
-
   if (output.exitCode !== 0) {
-    throw new Error(`mr-version failed for ${projectFile}: ${output.stderr}`)
+    throw new Error(
+      `'git ${args.join(' ')}' failed with exit code ${output.exitCode}. The tags were created locally only. ` +
+      `Make sure the job has 'permissions: contents: write' and actions/checkout kept its credentials ` +
+      `(persist-credentials: true, the default).\n` +
+      `${output.stderr.trim()}${output.stdout.trim() ? `\n${output.stdout.trim()}` : ''}`
+    )
   }
-
-  try {
-    return JSON.parse(output.stdout) as ProjectVersion
-  } catch (error) {
-    throw new Error(`Failed to parse mr-version output for ${projectFile}: ${error}`)
-  }
-}
-
-interface FilterOptions {
-  includeTestProjects: boolean
-  includeNonPackable: boolean
-  onlyChanged: boolean
-}
-
-function filterProjects(projects: ProjectVersion[], options: FilterOptions): ProjectVersion[] {
-  return projects.filter(project => {
-    // Filter test projects
-    if (!options.includeTestProjects && project.isTestProject) {
-      return false
-    }
-
-    // Filter non-packable projects
-    if (!options.includeNonPackable && !project.isPackable) {
-      return false
-    }
-
-    // Filter unchanged projects
-    if (options.onlyChanged && !project.versionChanged) {
-      return false
-    }
-
-    return true
-  })
+  for (const name of tagNames) core.info(`Pushed tag: ${name}`)
 }
 
 interface CreateTagsOptions {
@@ -211,11 +231,8 @@ async function createTags(options: CreateTagsOptions): Promise<TagCreationResult
 
   // Create project-specific tags
   for (const project of options.projects) {
-    const projectTag = `${project.project.toLowerCase()}/${options.tagPrefix}${project.version}`
-    const message = options.tagMessageTemplate
-      .replace('{version}', project.version)
-      .replace('{project}', project.project)
-      .replace('{type}', project.project)
+    const projectTag = projectTagName(project.project, options.tagPrefix, project.version)
+    const message = formatTagMessage(options.tagMessageTemplate, project.version, project.project, project.project)
 
     const tagInfo = await createTag({
       tagName: projectTag,
@@ -234,7 +251,7 @@ async function createTags(options: CreateTagsOptions): Promise<TagCreationResult
 
     if (tagInfo.created) {
       result.totalCount++
-    } else {
+    } else if (tagInfo.skipped) {
       result.skippedCount++
     }
   }
@@ -244,10 +261,7 @@ async function createTags(options: CreateTagsOptions): Promise<TagCreationResult
     const globalTags = determineGlobalTags(options.projects, options.globalTagStrategy, options.tagPrefix)
 
     for (const globalTag of globalTags) {
-      const message = options.tagMessageTemplate
-        .replace('{version}', globalTag.version)
-        .replace('{project}', 'Global')
-        .replace('{type}', 'Global')
+      const message = formatTagMessage(options.tagMessageTemplate, globalTag.version, 'Global', 'Global')
 
       const tagInfo = await createTag({
         tagName: globalTag.tagName,
@@ -266,55 +280,13 @@ async function createTags(options: CreateTagsOptions): Promise<TagCreationResult
 
       if (tagInfo.created) {
         result.totalCount++
-      } else {
+      } else if (tagInfo.skipped) {
         result.skippedCount++
       }
     }
   }
 
   return result
-}
-
-function determineGlobalTags(projects: ProjectVersion[], strategy: string, tagPrefix: string): { tagName: string; version: string }[] {
-  const globalTags: { tagName: string; version: string }[] = []
-
-  for (const project of projects) {
-    const version = project.version
-    const versionParts = version.split('.')
-
-    if (versionParts.length < 3) continue
-
-    const minor = parseInt(versionParts[1])
-    const patch = parseInt(versionParts[2])
-
-    let shouldCreateGlobalTag = false
-
-    switch (strategy.toLowerCase()) {
-      case 'major-only':
-        shouldCreateGlobalTag = minor === 0 && patch === 0
-        break
-      case 'all':
-        shouldCreateGlobalTag = true
-        break
-      case 'none':
-        shouldCreateGlobalTag = false
-        break
-    }
-
-    if (shouldCreateGlobalTag) {
-      const globalTagName = `${tagPrefix}${version}`
-
-      // Avoid duplicates
-      if (!globalTags.some(tag => tag.tagName === globalTagName)) {
-        globalTags.push({
-          tagName: globalTagName,
-          version: version
-        })
-      }
-    }
-  }
-
-  return globalTags
 }
 
 interface CreateTagOptions {
@@ -408,16 +380,15 @@ async function createTag(options: CreateTagOptions): Promise<TagInfo> {
     })
 
     if (output.exitCode !== 0) {
-      throw new Error(`Git tag creation failed: ${output.stderr}`)
+      throw new Error(`git tag failed: ${(output.stderr || output.stdout).trim()}`)
     }
 
     tagInfo.created = true
     core.info(`Created tag: ${options.tagName}`)
 
   } catch (error) {
-    tagInfo.skipped = true
-    tagInfo.reason = `Failed to create: ${error}`
-    core.error(`Failed to create tag ${options.tagName}: ${error}`)
+    tagInfo.reason = `Failed to create: ${error instanceof Error ? error.message : String(error)}`
+    core.error(`Failed to create tag ${options.tagName}: ${error instanceof Error ? error.message : String(error)}`)
   }
 
   return tagInfo
@@ -443,7 +414,7 @@ const asTableRow = (...data: (string | number)[]): SummaryTableRow => data.map(d
 
 const asSummaryTableCell = (data: string, header?: boolean): SummaryTableCell => ({ data, header: header ?? false });
 
-async function addJobSummary(result: TagCreationResult, dryRun: boolean, totalProjects: number): Promise<void> {
+async function addJobSummary(result: TagCreationResult, dryRun: boolean, totalProjects: number, pushedTags: string[]): Promise<void> {
   const createdTags = result.tagsCreated.filter(t => t.created)
   const skippedTags = result.tagsCreated.filter(t => t.skipped)
   const failedTags = result.tagsCreated.filter(t => !t.created && !t.skipped)
@@ -456,6 +427,8 @@ async function addJobSummary(result: TagCreationResult, dryRun: boolean, totalPr
       `- **Project Tags**: ${result.projectTags.length}\n` +
       `- **Global Tags**: ${result.globalTags.length}\n` +
       `- **Skipped Tags**: ${result.skippedCount}\n` +
+      `- **Failed Tags**: ${failedTags.length}\n` +
+      `- **Pushed Tags**: ${pushedTags.length > 0 ? pushedTags.map(t => `\`${t}\``).join(', ') : 'none'}\n` +
       `- **Mode**: ${dryRun ? '🧪 Dry Run' : '🚀 Live'}`
     )
 
@@ -493,7 +466,7 @@ async function addJobSummary(result: TagCreationResult, dryRun: boolean, totalPr
     ]
 
     for (const tag of result.tagsCreated) {
-      const status = tag.created ? '✅ Created' : (tag.skipped ? `⏭️ Skipped: ${tag.reason}` : '❌ Failed')
+      const status = tag.created ? '✅ Created' : (tag.skipped ? `⏭️ Skipped: ${tag.reason}` : `❌ Failed: ${tag.reason}`)
       const type = tag.isGlobal ? 'Global' : 'Project'
       tableLines.push(asTableRow(tag.tagName, type, tag.projectName, tag.version, status));
     }
@@ -504,7 +477,7 @@ async function addJobSummary(result: TagCreationResult, dryRun: boolean, totalPr
         '| Tag | Type | Project | Version | Status |\n' +
         '|-----|------|---------|---------|--------|\n' +
         result.tagsCreated.map(tag => {
-          const status = tag.created ? '✅ Created' : (tag.skipped ? `⏭️ Skipped: ${tag.reason}` : '❌ Failed')
+          const status = tag.created ? '✅ Created' : (tag.skipped ? `⏭️ Skipped: ${tag.reason}` : `❌ Failed: ${tag.reason}`)
           const type = tag.isGlobal ? 'Global' : 'Project'
           return `| \`${tag.tagName}\` | ${type} | ${tag.projectName} | \`${tag.version}\` | ${status} |`
         }).join('\n')

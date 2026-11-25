@@ -8,13 +8,26 @@ branding:
 
 inputs:
   repository-path:
-    description: 'Path to the Git repository root'
+    description: 'Path to the Git repository root (tags are created here; project patterns are relative to it)'
     required: false
     default: '.'
   projects:
-    description: 'Glob pattern or comma-separated list of project files to tag'
+    description: 'Glob patterns or project file paths to tag, separated by commas and/or newlines. Relative patterns are resolved against repository-path; prefix with ! to exclude. The step fails when nothing matches. Not used with projects-json.'
     required: false
     default: '**/*.csproj'
+  projects-json:
+    description: 'The projects output of mr-version/calculate (JSON array). When set, exactly these versions are tagged and nothing is recalculated, so prerelease-type, config-file and force-version used by calculate carry over.'
+    required: false
+  prerelease-type:
+    description: 'Prerelease type for main/dev branches (none, alpha, beta, rc) when tag calculates versions itself (without projects-json)'
+    required: false
+    default: 'none'
+  config-file:
+    description: 'Path to mr-version.yml when tag calculates versions itself (auto-detected if not specified)'
+    required: false
+  force-version:
+    description: 'Force a specific version for all projects when tag calculates versions itself'
+    required: false
   tag-prefix:
     description: 'Prefix for version tags'
     required: false
@@ -32,7 +45,7 @@ inputs:
     required: false
     default: 'Release {type} {version}'
   dry-run:
-    description: 'Show what tags would be created without actually creating them'
+    description: 'Show what tags would be created without actually creating or pushing them'
     required: false
     default: 'false'
   fail-on-existing:
@@ -55,7 +68,15 @@ inputs:
     description: 'Sign tags with GPG (requires git config user.signingkey)'
     required: false
     default: 'false'
-  
+  push-tags:
+    description: 'Push the tags created by this step to origin (git push origin refs/tags/<tag>...; other local tags are not pushed). Requires permissions: contents: write.'
+    required: false
+    default: 'false'
+  allow-shallow:
+    description: 'Calculate versions even if the repository is a shallow clone (only without projects-json). By default a shallow clone fails the step; use actions/checkout with fetch-depth: 0'
+    required: false
+    default: 'false'
+
 outputs:
   tags-created:
     description: 'JSON array of tags that were created'
@@ -67,7 +88,9 @@ outputs:
     description: 'Total number of tags created'
   tags-skipped:
     description: 'Number of tags that were skipped (already exist or dry-run)'
+  tags-pushed:
+    description: 'JSON array of the tag names pushed to origin (empty unless push-tags is true)'
 
 runs:
-  using: 'node20'
+  using: 'node24'
   main: 'dist/index.js'
